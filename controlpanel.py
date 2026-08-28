@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog
 import serial, serial.tools.list_ports, threading, time
 from collections import deque
 from matplotlib.figure import Figure
@@ -75,12 +75,13 @@ class App:
     SENSORS={'force':('Force','N','force','Tare  (TL)','TL'),
              'flux' :('Flux Density','mT','flux','Zero  (ZH)','ZH'),
              'temp' :('Temperature','°C','t1',None,None)}
+    FLUX_DEADBAND=0.5   # mT
 
     def __init__(self,root):
         self.link=SerialLink(); self.root=root; self.sensor='force'
-        self.last_send=0
+        self.last_send=0; self._last_row_t=None
         root.title("Grip Rehab — Sensor Control Panel")
-        root.geometry("1120x680"); root.minsize(940,580)
+        root.geometry("1150x790"); root.minsize(980,660)
         root.bind('<Escape>', lambda e:self._kill())
         self._topbar()
         body=ttk.Frame(root); body.pack(fill='both',expand=True,padx=8,pady=(0,8))
@@ -199,29 +200,48 @@ class App:
     def _sensor_panel(self,parent):
         f=ttk.LabelFrame(parent,text="Sensor Monitor")
         f.grid(row=0,column=1,sticky='nsew',padx=(4,0))
-        f.columnconfigure(0,weight=1); f.rowconfigure(2,weight=1)
+        f.columnconfigure(0,weight=1); f.rowconfigure(3,weight=1)
 
-        sel=ttk.Frame(f); sel.grid(row=0,column=0,sticky='w',padx=12,pady=10)
+        sel=ttk.Frame(f); sel.grid(row=0,column=0,sticky='ew',padx=12,pady=8)
         self.sensvar=tk.StringVar(value='force')
         for key,(name,*_ ) in self.SENSORS.items():
             ttk.Radiobutton(sel,text=name,value=key,variable=self.sensvar,
                 command=self._switch).pack(side='left',padx=6)
+        self.tzbtn=ttk.Button(sel,text="Tare  (TL)",command=self._tare_zero)
+        self.tzbtn.pack(side='right')
 
-        self.big=ttk.Label(f,text="—",font=('Consolas',34,'bold'))
-        self.big.grid(row=1,column=0,pady=(0,4))
+        read=ttk.Frame(f); read.grid(row=1,column=0,sticky='ew',padx=16,pady=(0,4))
+        read.columnconfigure(1,weight=1)
+        self.tag=tk.Label(read,text="—",font=('Segoe UI',24,'bold'),fg='gray',width=8)
+        self.tag.grid(row=0,column=0,rowspan=2,padx=(0,18))
+        self.big=tk.Label(read,text="—",font=('Consolas',30,'bold'))
+        self.big.grid(row=0,column=1,sticky='w')
+        self.detail=ttk.Label(read,text="",font=('Segoe UI',11))
+        self.detail.grid(row=1,column=1,sticky='w')
 
-        self.fig=Figure(figsize=(5,3),dpi=100); self.ax=self.fig.add_subplot(111)
+        self.fig=Figure(figsize=(5,1.9),dpi=100); self.ax=self.fig.add_subplot(111)
         self.canvas=FigureCanvasTkAgg(self.fig,master=f)
-        self.canvas.get_tk_widget().grid(row=2,column=0,sticky='nsew',padx=10,pady=6)
+        self.canvas.get_tk_widget().grid(row=2,column=0,sticky='ew',padx=10,pady=4)
 
-        self.tzbtn=ttk.Button(f,text="Tare  (TL)",command=self._tare_zero)
-        self.tzbtn.grid(row=3,column=0,pady=(0,12))
+        tbl=ttk.Frame(f); tbl.grid(row=3,column=0,sticky='nsew',padx=10,pady=(2,10))
+        tbl.rowconfigure(0,weight=1); tbl.columnconfigure(0,weight=1)
+        cols=('t','value','state')
+        self.tree=ttk.Treeview(tbl,columns=cols,show='headings',height=8)
+        for c,w in zip(cols,('t (s)','value','state')):
+            self.tree.heading(c,text=w)
+        for c,w in zip(cols,(90,150,110)):
+            self.tree.column(c,width=w,anchor='center')
+        self.tree.grid(row=0,column=0,sticky='nsew')
+        sb=ttk.Scrollbar(tbl,command=self.tree.yview); sb.grid(row=0,column=1,sticky='ns')
+        self.tree.configure(yscrollcommand=sb.set)
 
     def _switch(self):
         self.sensor=self.sensvar.get(); self._build_lines()
         _,_,_,btxt,_=self.SENSORS[self.sensor]
         if btxt: self.tzbtn.config(text=btxt,state='normal')
         else: self.tzbtn.config(text="—",state='disabled')
+        for it in self.tree.get_children(): self.tree.delete(it)
+        self._last_row_t=None
 
     def _tare_zero(self):
         cmd=self.SENSORS[self.sensor][4]
@@ -240,6 +260,27 @@ class App:
             self.ax.set_ylabel(unit); self.keys=(hk,)
         self.fig.tight_layout(); self.canvas.draw()
 
+    # per-sensor readout: (tag, color, big text, detail, table value)
+    def _readout(self,lt):
+        s=self.sensor
+        if s=='flux':
+            v=lt['flux']; db=self.FLUX_DEADBAND
+            if v>db: tag,col='SOUTH','#c0392b'
+            elif v<-db: tag,col='NORTH','#2471a3'
+            else: tag,col='—','gray'
+            return tag,col,f"{abs(v):.2f} mT",f"signed {v:+.2f} mT",f"{v:+.2f} mT"
+        if s=='force':
+            v=lt['force']
+            if v>0.05: tag,col='LOAD','#1e8449'
+            elif v<-0.05: tag,col='TENSION','#b9770e'
+            else: tag,col='—','gray'
+            return tag,col,f"{v:.3f} N",f"{v*1000/9.81:.0f} g equivalent",f"{v:.3f} N"
+        t1,t2=lt['t1'],lt['t2']
+        if t1>=60 or t2>=70: tag,col='HOT','#c62828'
+        elif t1>=55 or t2>=65: tag,col='WARN','#e08000'
+        else: tag,col='OK','#1e8449'
+        return tag,col,f"{t1:.1f} / {t2:.1f} °C","casing / magnet",f"{t1:.1f}/{t2:.1f}"
+
     # ---------- loop ----------
     def _tick(self):
         L=self.link
@@ -255,11 +296,10 @@ class App:
         self._temp_label('t1',lt['t1'],55,60)
         self._temp_label('t2',lt['t2'],65,70)
 
-        if self.sensor=='temp':
-            self.big.config(text=f"{lt['t1']:.1f} / {lt['t2']:.1f} °C")
-        else:
-            _,unit,hk,*_=self.SENSORS[self.sensor]
-            self.big.config(text=f"{lt[hk]:.2f} {unit}")
+        tag,col,bigtxt,det,rowval=self._readout(lt)
+        self.tag.config(text=tag,fg=col)
+        self.big.config(text=bigtxt)
+        self.detail.config(text=det)
 
         if lt['fault']:
             self.faultlbl.config(text=" THERMAL FAULT — coil de-energized ",bg='#c62828')
@@ -278,6 +318,14 @@ class App:
             self.ax.set_ylim(lo-m,hi+m)
             self.canvas.draw_idle()
 
+            ct=t[-1]
+            if ct!=self._last_row_t:
+                self._last_row_t=ct
+                self.tree.insert('','end',values=(f"{ct:.1f}",rowval,tag))
+                ch=self.tree.get_children()
+                if len(ch)>200: self.tree.delete(ch[0])
+                self.tree.yview_moveto(1.0)
+
         self.root.after(80,self._tick)
 
     def _temp_label(self,k,val,warn,cut):
@@ -290,7 +338,10 @@ class App:
         if not self.link.ser:
             self.reclbl.config(text="Connect first"); return
         if not self.link.recording:
-            fn=f"grip_log_{datetime.now():%Y%m%d_%H%M%S}.csv"
+            fn=filedialog.asksaveasfilename(defaultextension='.csv',
+                initialfile=f"grip_log_{datetime.now():%Y%m%d_%H%M%S}.csv",
+                filetypes=[("CSV files","*.csv"),("All files","*.*")])
+            if not fn: return
             try: self.link.start_rec(fn)
             except Exception as e:
                 self.reclbl.config(text=f"REC error: {e}"); return
