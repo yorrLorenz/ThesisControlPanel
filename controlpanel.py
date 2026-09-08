@@ -8,7 +8,7 @@ import csv
 from datetime import datetime
 
 BAUD = 115200
-MAXPTS = 400
+MAXPTS = 5000
 
 class SerialLink:
     def __init__(self):
@@ -28,6 +28,11 @@ class SerialLink:
         self.stop_rec()
         self.running=False; time.sleep(0.25)
         if self.ser: self.ser.close(); self.ser=None
+
+    def reset_time(self):
+        with self.lock:
+            self.t0=time.time()
+            for d in self.hist.values(): d.clear()
 
     def send(self,s):
         if self.ser and self.ser.is_open:
@@ -209,6 +214,7 @@ class App:
                 command=self._switch).pack(side='left',padx=6)
         self.tzbtn=ttk.Button(sel,text="Tare  (TL)",command=self._tare_zero)
         self.tzbtn.pack(side='right')
+        ttk.Button(sel,text="Reset graph",command=self._reset_graph).pack(side='right',padx=6)
 
         read=ttk.Frame(f); read.grid(row=1,column=0,sticky='ew',padx=16,pady=(0,4))
         read.columnconfigure(1,weight=1)
@@ -242,6 +248,10 @@ class App:
         else: self.tzbtn.config(text="—",state='disabled')
         for it in self.tree.get_children(): self.tree.delete(it)
         self._last_row_t=None
+
+    def _reset_graph(self):
+        self.link.reset_time(); self._last_row_t=None
+        for it in self.tree.get_children(): self.tree.delete(it)
 
     def _tare_zero(self):
         cmd=self.SENSORS[self.sensor][4]
@@ -310,7 +320,7 @@ class App:
         if t:
             self.l1.set_data(t,ys[0])
             if self.l2 is not None and len(ys)>1: self.l2.set_data(t,ys[1])
-            self.ax.set_xlim(max(0,t[-1]-30),max(30,t[-1]))
+            self.ax.set_xlim(t[0],max(t[0]+5,t[-1]))
             allv=[v for y in ys for v in y] or [0]
             lo,hi=min(allv),max(allv)
             if lo==hi: lo-=1; hi+=1
