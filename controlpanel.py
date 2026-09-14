@@ -85,6 +85,7 @@ class App:
     def __init__(self,root):
         self.link=SerialLink(); self.root=root; self.sensor='force'
         self.last_send=0; self._last_row_t=None
+        self.run_t0=None; self.run_held=0.0
         root.title("Grip Rehab — Sensor Control Panel")
         root.geometry("1150x790"); root.minsize(980,660)
         root.bind('<Escape>', lambda e:self._kill())
@@ -138,8 +139,12 @@ class App:
         self.killbtn.grid(row=0,column=0,sticky='ew',padx=12,pady=12)
 
         self.en=tk.BooleanVar(value=False)
-        ttk.Checkbutton(f,text="Output enabled",variable=self.en,
-            command=self._enable).grid(row=1,column=0,sticky='w',padx=14)
+        enrow=ttk.Frame(f); enrow.grid(row=1,column=0,sticky='ew',padx=14)
+        ttk.Checkbutton(enrow,text="Output enabled",variable=self.en,
+            command=self._enable).pack(side='left')
+        self.runlbl=ttk.Label(enrow,text="00:00:00.000",font=('Consolas',13,'bold'),
+            foreground='gray')
+        self.runlbl.pack(side='right')
 
         self.duty=tk.IntVar(value=0)
         self.dutylbl=ttk.Label(f,text="Duty: 0 / 255   (0.0%)",font=('Segoe UI',13,'bold'))
@@ -196,10 +201,31 @@ class App:
 
     def _enable(self):
         self.link.send('E1' if self.en.get() else 'E0')
-        if self.en.get(): self._set_duty(self.duty.get(),force=True)
+        if self.en.get():
+            self._run_start(); self._set_duty(self.duty.get(),force=True)
+        else:
+            self._run_stop()
 
     def _kill(self):
-        self.link.send('K'); self.en.set(False); self._set_duty(0)
+        self.link.send('K'); self.en.set(False); self._run_stop(); self._set_duty(0)
+
+    # ---------- output-enable run timer ----------
+    def _run_start(self):
+        self.run_t0=time.time(); self.run_held=0.0
+        self.runlbl.config(foreground='#1e8449')
+        self._run_update(0.0)
+
+    def _run_stop(self):
+        if self.run_t0 is not None:
+            self.run_held=time.time()-self.run_t0
+        self.run_t0=None
+        self.runlbl.config(foreground='gray')
+        self._run_update(self.run_held)
+
+    def _run_update(self,sec):
+        ms=int(sec*1000)
+        h,ms=divmod(ms,3600000); m,ms=divmod(ms,60000); s,ms=divmod(ms,1000)
+        self.runlbl.config(text=f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}")
 
     # ---------- right: sensor ----------
     def _sensor_panel(self,parent):
@@ -301,6 +327,9 @@ class App:
 
         if L.recording:
             self.reclbl.config(text=f"REC ● {L.rec_rows} rows")
+
+        if self.run_t0 is not None:
+            self._run_update(time.time()-self.run_t0)
 
         self.rd['i'].config(text=f"{lt['i']:.2f} A")
         self._temp_label('t1',lt['t1'],55,60)
